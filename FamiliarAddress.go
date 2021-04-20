@@ -10,35 +10,60 @@ import (
 	"strconv"
 )
 
-var N int = 5 // all number of PKG
+// variables
+
+var r *BN254_FA.BIG = BN254_FA.NewBIGints(BN254_FA.CURVE_Order)
+var G1 *BN254_FA.ECP = BN254_FA.ECP_generator()
+var G2 *BN254_FA.ECP2 = BN254_FA.ECP2_generator()
+
+var N int = 5 // number of all PKG
 var T int = 3 // threshold
+var K int = 4 // number of involved PKG to issue user familiar key
+
+// variables in protocol "master_key_share_generate"
 
 var seeds = make([][100]byte, N)
 var rngs = make([]*core.RAND, N)
 
 var ids = make([][32]byte, N)
 
-var Sks = make([][32]byte, N) // private key
-var Pks = make([][65]byte, N) // public key
+var Sks = make([][32]byte, N)
+var Pks = make([][65]byte, N)
 
 var polyss = make([][][32]byte, N)
 var polyPointss = make([][][65]byte, N)
 var sharess = make([][][32]byte, N)
 
 var msgSks = make([][32]byte, N)
-var Es = make([][32]byte, N)
-var Ss = make([][32]byte, N)
+var ESks = make([][32]byte, N)
+var SSks = make([][32]byte, N)
 
-var secretss = make([][][]byte, N)
-var Cs = make([][32]byte, N)
-var Ds = make([][][]byte, N)
+var CSks = make([][32]byte, N)
+var DSks = make([][][]byte, N)
 
 var MSks = make([][32]byte, N)
 var MPk [65]byte
 
-func familiar_address() {
-	r := BN254_FA.NewBIGints(BN254_FA.CURVE_Order)
-	G2 := BN254_FA.ECP2_generator()
+// variables in protocol "user_familiar_key_generate"
+
+var userSeed [100]byte
+var userRng *core.RAND
+
+var ID []byte
+var blind [32]byte
+var blindQ [65]byte
+
+var as = make([][32]byte, K)
+var As = make([][65]byte, K)
+
+var msgAs = make([][32]byte, N)
+var EAs = make([][32]byte, N)
+var SAs = make([][32]byte, N)
+
+var CAs = make([][32]byte, N)
+var DAs = make([][][]byte, N)
+
+func master_key_share_generate() {
 
 	// every PKG generates his own seed (saved in seeds, 100byte) used in PRNG
 	// every PKG generates his own PRNG (saved in rngs)
@@ -48,9 +73,7 @@ func familiar_address() {
 		for j := 0; j < 100; j++ {
 			seeds[i][j] = byte(i * j)
 		}
-	}
 
-	for i := 0; i < N; i++ {
 		rngs[i] = core.NewRAND()
 		rngs[i].Seed(100, seeds[i][:])
 	}
@@ -62,7 +85,7 @@ func familiar_address() {
 	for i := 0; i < N; i++ {
 		BN254_FA.Randomnum(r, rngs[i]).ToBytes(ids[i][:])
 
-		res := BN254_FA.KeyPairGenerate(rngs[i], Sks[i][:], Pks[i][:])
+		res := BN254_FA.KeyPairGenerateFA(rngs[i], Sks[i][:], Pks[i][:])
 		if res != 0 {
 			fmt.Printf(strconv.Itoa(i) + "-th PKG, Failed to generate keys\n")
 			return
@@ -90,26 +113,26 @@ func familiar_address() {
 		sharess[i] = shares
 	}
 
-	// every PKG generate schnorr zk proof (saved Es, Ss, 32byte) on random num (saved in msgSks, 32byte)
-	fmt.Println("\nevery PKG generate schnorr zk proof (saved Es, Ss, 32byte) on random num (saved in msgSks, 32byte)")
+	// every PKG generate sk's schnorr zk proof (saved ESks, SSks, 32byte) on random num (saved in msgSks, 32byte)
+	fmt.Println("\nevery PKG generate schnorr sk's zk proof (saved ESks, SSks, 32byte) on random num (saved in msgSks, 32byte)")
 	for i := 0; i < N; i++ {
 		BN254_FA.Random(rngs[i]).ToBytes(msgSks[i][:])
-		Es[i], Ss[i] = SchnorrZK.SZKProve(rngs[i], Sks[i], msgSks[i][:])
-
+		ESks[i], SSks[i] = SchnorrZK.SZKProve(rngs[i], Sks[i], msgSks[i][:])
 	}
 
-	// every PKG commit (saved in Cs, 32byte, Ds) to Pks and the above schnorr zk proof (saved in secretss)
-	fmt.Println("\nevery PKG commit (saved in Cs, 32byte, Ds) to Pks, above schnorr zk proof and polyPointss (saved in secretss)")
+	// every PKG commit (saved in CSks, 32byte, DSks) to pk, the above sk's schnorr zk proof and polyPointss
+	fmt.Println("\nevery PKG commit (saved in Cs, 32byte, Ds) to pk, the above sk's schnorr zk proof and polyPointss")
 	for i := 0; i < N; i++ {
-		secretss[i] = append(secretss[i], Pks[i][:])
-		secretss[i] = append(secretss[i], Es[i][:])
-		secretss[i] = append(secretss[i], Ss[i][:])
-		secretss[i] = append(secretss[i], msgSks[i][:])
+		var secrets = make([][]byte, N)
+		secrets = append(secrets, Pks[i][:])
+		secrets = append(secrets, ESks[i][:])
+		secrets = append(secrets, SSks[i][:])
+		secrets = append(secrets, msgSks[i][:])
 		for j := 0; j < T; j++ {
-			secretss[i] = append(secretss[i], polyPointss[i][j][:])
+			secrets = append(secrets, polyPointss[i][j][:])
 		}
 
-		Cs[i], Ds[i] = Commit.Commit(secretss[i], rngs[i])
+		CSks[i], DSks[i] = Commit.Commit(secrets, rngs[i])
 	}
 
 	// every PKG broadcasts the commit C
@@ -120,11 +143,11 @@ func familiar_address() {
 	fmt.Println("\nevery PKG validate the commit and validate the schnorr zk proof")
 	fmt.Println("validate commit:")
 	for i := 0; i < N; i++ {
-		fmt.Println(strconv.FormatBool(Commit.Verify(Cs[i], Ds[i])))
+		fmt.Println(strconv.FormatBool(Commit.Verify(CSks[i], DSks[i])))
 	}
 	fmt.Println("\nvalidate schnorr zk proof:")
 	for i := 0; i < N; i++ {
-		fmt.Println(strconv.FormatBool(SchnorrZK.SZKVerify(Pks[i], msgSks[i][:], Es[i], Ss[i])))
+		fmt.Println(strconv.FormatBool(SchnorrZK.SZKVerify(Pks[i], msgSks[i][:], ESks[i], SSks[i])))
 	}
 
 	// every PKG sends the vss share to corresponding PKG through secure channel
@@ -138,8 +161,8 @@ func familiar_address() {
 		for j := 0; j < N; j++ {
 			var temArr [][65]byte
 			var tem [65]byte
-			for k := 0; k < len(Ds[j][5:]); k++ {
-				copy(tem[:], Ds[j][k+5])
+			for k := 0; k < len(DSks[j][5:]); k++ {
+				copy(tem[:], DSks[j][k+5])
 				temArr = append(temArr, tem)
 			}
 			fmt.Println(strconv.FormatBool(VSS.Verify(sharess[j][i], ids[i], temArr)))
@@ -147,10 +170,10 @@ func familiar_address() {
 	}
 
 	// every PKG calculates the master private key share (saved in MSks, 32byte) and public key
-	// 		example: PKG i calculate the sum of sharess[j][i] j in (0, N) as MSk
+	// 		example: PKG i calculate the sum of sharess[j][i] j in (0, N-1) as MSk
 	fmt.Println("\nevery PKG calculates the master private key share (saved in MSks, 32byte) and public key (saved in MPk, 65byte)")
-	fmt.Println("example: PKG i calculate the sum of sharess[j][i] j in (0, N) as MSk")
-	MPkPoint := BN254_FA.ECP2_fromBytes(Ds[0][1])
+	fmt.Println("example: PKG i calculate the sum of sharess[j][i] j in (1, N) as MSk")
+	MPkPoint := BN254_FA.ECP2_fromBytes(DSks[0][1])
 	for i := 0; i < N; i++ {
 		fmt.Println(strconv.Itoa(i) + "-th PKG's MSk:")
 		MSk := BN254_FA.NewBIG()
@@ -161,7 +184,7 @@ func familiar_address() {
 		MSk.ToBytes(MSks[i][:])
 		printBinary(MSks[i][:])
 
-		temPoint := BN254_FA.ECP2_fromBytes(Ds[i][1])
+		temPoint := BN254_FA.ECP2_fromBytes(DSks[i][1])
 		if i > 0 {
 			MPkPoint.Add(temPoint)
 		}
@@ -180,8 +203,54 @@ func familiar_address() {
 	fmt.Println(strconv.FormatBool(mpkPoingRec.Equals(MPkPoint)))
 }
 
-func main() {
-	familiar_address()
+func user_familiar_key_generate() {
+
+	// user generates his own seed (saved in userSeed, 100byte) used in PRNG
+	// user generates his own PRNG (saved in userRng)
+	for j := 0; j < 100; j++ {
+		userSeed[j] = byte(j * j)
+	}
+
+	userRng = core.NewRAND()
+	userRng.Seed(100, userSeed[:])
+
+	// user set familiar ID (saved in ID)
+	// user calculate blind key (saved in blindQ) as blind rnd (saved in blind) multiple G1
+	ID = []byte("xichan@163.com")
+	blindBig := BN254_FA.Randomnum(r, userRng)
+	blindBig.ToBytes(blind[:])
+	blindQPoint := BN254_FA.G1mul(G1, blindBig)
+	blindQPoint.ToBytes(blindQ[:], true)
+
+	// user sends (ID, blindQ) to PKG i where i in (1, K) and K >= T
+
+	// every PKG select random number a (saved in as, 32byte), and
+	// 		calculate A (saved in As, 65byte) by multiplying a and blindQ
+	for i := 0; i < K; i++ {
+		BN254_FA.Randomnum(r, rngs[i]).ToBytes(as[i][:])
+		aBig := BN254_FA.FromBytes(as[i][:])
+		BN254_FA.G1mul(blindQPoint, aBig).ToBytes(As[i][:], true)
+	}
+
+	// every PKG generate a's schnorr zk proof (saved EAs, SAs, 32byte) on random num (saved in msgAs, 32byte)
+	fmt.Println("\nevery PKG generate a's schnorr zk proof (saved EAs, SAs, 32byte) on random num (saved in msgAs, 32byte)")
+	for i := 0; i < K; i++ {
+		BN254_FA.Random(rngs[i]).ToBytes(msgAs[i][:])
+		EAs[i], SAs[i] = SchnorrZK.SZKProve(rngs[i], as[i], msgAs[i][:])
+	}
+
+	// every PKG commit (saved in CAs, 32byte, DAs) to A and the above a's schnorr zk proof
+	fmt.Println("\nevery PKG commit (saved in CAs, 32byte, DAs) to A and the above a's schnorr zk proof")
+	for i := 0; i < K; i++ {
+		var secrets = make([][]byte, N)
+		secrets = append(secrets, As[i][:])
+		secrets = append(secrets, EAs[i][:])
+		secrets = append(secrets, SAs[i][:])
+		secrets = append(secrets, msgAs[i][:])
+
+		CAs[i], DAs[i] = Commit.Commit(secrets, rngs[i])
+	}
+
 }
 
 func printBinary(array []byte) {
@@ -189,4 +258,9 @@ func printBinary(array []byte) {
 		fmt.Printf("%02x", array[i])
 	}
 	fmt.Printf("\n")
+}
+
+func main() {
+	master_key_share_generate()
+	user_familiar_key_generate()
 }
