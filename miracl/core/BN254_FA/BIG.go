@@ -757,6 +757,14 @@ func (r *BIG) One() {
 	}
 }
 
+/* set the value to int, be careful negtive value, will overflow */
+func (r *BIG) SetInt(val int) {
+	r.w[0] = Chunk(val)
+	for i := 1; i < NLEN; i++ {
+		r.w[i] = 0
+	}
+}
+
 /* return a^2 mod m */
 func Modsqr(a1, m *BIG) *BIG {
 	a := NewBIGcopy(a1)
