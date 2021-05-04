@@ -15,8 +15,11 @@ import (
 // variables
 
 var r *BN254_FA.BIG = BN254_FA.NewBIGints(BN254_FA.CURVE_Order)
+var rBigInt *big.Int
 var G1 *BN254_FA.ECP = BN254_FA.ECP_generator()
 var G2 *BN254_FA.ECP2 = BN254_FA.ECP2_generator()
+
+var NSubN2Bytes []byte // paillier.N - pair.r ^ 2
 
 var N int = 5 // number of all PKG
 var T int = 3 // threshold
@@ -75,14 +78,22 @@ var bs = make([][32]byte, K)
 
 var aCiphers = make([][]byte, 0) // length K, use append to add
 
-var NSubN2Bytes []byte // paillier.N - pair.r ^ 2
-
 var betaHatss [][][]byte // -beta, but absolute value
 var betass [][][]byte
 var alphaCipherss [][][]byte
 var alphass [][][]byte
 var cs [][]byte
 var csSign = make([]int, K) // if -1, then cs[i] is neg
+
+var DIdHat [65]byte
+
+var DId [65]byte // user private key
+
+var partMSks = make([][32]byte, K)
+var polyRefreshss = make([][][32]byte, N)
+var polyRefreshPointss = make([][][65]byte, N)
+var shareRefreshss = make([][][32]byte, N)
+var MSkRefreshs = make([][32]byte, N)
 
 func master_key_share_generate() {
 
@@ -235,11 +246,12 @@ func master_key_share_generate() {
 
 func user_familiar_key_generate() {
 	// calculate NSubN2Bytes (saved in NSubN2Bytes, paillier.N - pair.r ^ 2), used for c = MtA(a, b)
+	// 		and calculates rBigInt (r in big.Int format)
 	{
 		pNSalt := new(big.Int).Lsh(big.NewInt(1), uint(PaillierPks[0].Length-3))
 		var rBytes [32]byte
 		r.ToBytes(rBytes[:])
-		rBigInt := new(big.Int).SetBytes(rBytes[:])
+		rBigInt = new(big.Int).SetBytes(rBytes[:])
 		r2BigInt := new(big.Int).Mul(rBigInt, rBigInt)
 		NSubN2 := new(big.Int).Sub(pNSalt, r2BigInt)
 
@@ -380,13 +392,6 @@ func user_familiar_key_generate() {
 			betaHatss = append(betaHatss, temBetaHats)
 			betass = append(betass, temBetas)
 		}
-
-		beta00 := new(big.Int).SetBytes(betass[0][0])
-		betaHat00 := new(big.Int).SetBytes(betaHatss[0][0])
-
-		fmt.Println("equal?")
-		printBinary(beta00.Bytes())
-		printBinary(betaHat00.Bytes())
 	}
 
 	// every PKG i calculates alphaCipher_ij (saved in alphaCipherss) by aCipher_j homemul b_i homeadd betaHat_ij for j in (1, K)
@@ -418,6 +423,7 @@ func user_familiar_key_generate() {
 		}
 	}
 	// every PKG i calcalulates the c_i (saved in cs)
+	// 		and broadcasts c_i
 	{
 		for i := 0; i < K; i++ {
 			temC := new(big.Int).SetBytes(betass[i][0])
@@ -428,15 +434,57 @@ func user_familiar_key_generate() {
 			for j := 0; j < K; j++ {
 				temC = new(big.Int).Add(temC, new(big.Int).SetBytes(alphass[i][j]))
 			}
+			temC = new(big.Int).Mod(temC, rBigInt)
+
 			cs = append(cs, temC.Bytes())
 			csSign[i] = temC.Sign()
 		}
 	}
+
+	// every PKG received c_i, calculates DIdHat = sum(c_i) ^ -1 * sum(A_i), (DIdHat saved in DIdHat, [65]byte)
+	// 		and sends to User
+	{
+		cSumBigInt := new(big.Int).SetBytes(cs[0])
+		if csSign[0] < 0 {
+			cSumBigInt = new(big.Int).Neg(cSumBigInt)
+		}
+		for i := 1; i < K; i++ {
+			if csSign[i] < 0 {
+				cSumBigInt = new(big.Int).Sub(cSumBigInt, new(big.Int).SetBytes(cs[i]))
+			} else {
+				cSumBigInt = new(big.Int).Add(cSumBigInt, new(big.Int).SetBytes(cs[i]))
+			}
+		}
+		cSumBigInt = new(big.Int).Mod(cSumBigInt, rBigInt)
+
+		cSumBigInv := BN254_FA.FromBytes(cSumBigInt.Bytes())
+		cSumBigInv.Invmodp(r)
+
+		ASum := BN254_FA.ECP_fromBytes(As[0][:])
+		for i := 1; i < K; i++ {
+			temP := BN254_FA.ECP_fromBytes(As[i][:])
+			ASum.Add(temP)
+		}
+
+		BN254_FA.G1mul(ASum, cSumBigInv).ToBytes(DIdHat[:], true)
+	}
+
+	// User received the DIdHat and calculates the DId = DIdHat * blind ^-1 as private key, (DId saved in DId, [65]byte)
+	{
+		DIdHatQ := BN254_FA.ECP_fromBytes(DIdHat[:])
+
+		blindBigInv := BN254_FA.FromBytes(blind[:])
+		blindBigInv.Invmodp(r)
+
+		BN254_FA.G1mul(DIdHatQ, blindBigInv).ToBytes(DId[:], true)
+	}
 }
 
-func verify_cs() {
-	fmt.Println("Verify cs:")
+func verify_user_private_key() {
+	fmt.Println("\nVerify User private key:")
 	{
+		fmt.Println("\ncheck alpha01 + beta10 ?= a0 * b1:")
+
 		alpha01 := new(big.Int).SetBytes(alphass[0][1])
 		beta10 := new(big.Int).SetBytes(betass[1][0])
 		abSum := new(big.Int).Sub(alpha01, beta10)
@@ -445,23 +493,25 @@ func verify_cs() {
 		b1 := new(big.Int).SetBytes(bs[1][:])
 		abSumCal := new(big.Int).Mul(a0, b1)
 
-		fmt.Println("a0 * b1:")
 		printBinary(abSum.Bytes())
 		printBinary(abSumCal.Bytes())
 	}
 
+	cSum := new(big.Int).SetBytes(cs[0])
+	if csSign[0] < 0 {
+		cSum = new(big.Int).Neg(cSum)
+	}
+	for i := 1; i < K; i++ {
+		if csSign[i] < 0 {
+			cSum = new(big.Int).Sub(cSum, new(big.Int).SetBytes(cs[i]))
+		} else {
+			cSum = new(big.Int).Add(cSum, new(big.Int).SetBytes(cs[i]))
+		}
+	}
+	cSum = new(big.Int).Mod(cSum, rBigInt)
+
 	{
-		cSum := new(big.Int).SetBytes(cs[0])
-		if csSign[0] < 0 {
-			cSum = new(big.Int).Neg(cSum)
-		}
-		for i := 1; i < K; i++ {
-			if csSign[i] < 0 {
-				cSum = new(big.Int).Sub(cSum, new(big.Int).SetBytes(cs[i]))
-			} else {
-				cSum = new(big.Int).Add(cSum, new(big.Int).SetBytes(cs[i]))
-			}
-		}
+		fmt.Println("\ncheck cSum ?= a * b:")
 
 		aSum := new(big.Int).SetBytes(as[0][:])
 		for i := 1; i < K; i++ {
@@ -474,11 +524,120 @@ func verify_cs() {
 		}
 
 		cSumCal := new(big.Int).Mul(aSum, bSum)
+		cSumCal = new(big.Int).Mod(cSumCal, rBigInt)
 
-		fmt.Println("a * b:")
 		printBinary(cSum.Bytes())
 		printBinary(cSumCal.Bytes())
 	}
+	{
+		fmt.Println("\ncheck cSum ?= a * (s + H(ID))")
+
+		cSum2 := new(big.Int).Mod(cSum, rBigInt)
+
+		aSum2 := BN254_FA.FromBytes(as[0][:])
+		for i := 1; i < K; i++ {
+			tema := BN254_FA.FromBytes(as[i][:])
+			aSum2 = BN254_FA.Modadd(aSum2, tema, r)
+		}
+
+		_, s := VSS.Combine(MSks, ids)
+		sBig := BN254_FA.FromBytes(s[:])
+
+		H := core.NewHASH256()
+		H.Process_array(ID)
+		HIDBytes := H.Hash()
+		HIDBig := BN254_FA.FromBytes(HIDBytes)
+
+		cSumCal2 := BN254_FA.Modadd(sBig, HIDBig, r)
+		cSumCal2 = BN254_FA.Modmul(aSum2, cSumCal2, r)
+		var cSumCal2Bytes [32]byte
+		cSumCal2.ToBytes(cSumCal2Bytes[:])
+
+		printBinary(cSum2.Bytes())
+		printBinary(cSumCal2Bytes[:])
+	}
+	{
+		fmt.Println("\nVerify user private key according to standard identity-based signature:")
+		// standard ibs, DId = (s + h(ID)) ^ -1 * Q1
+		_, s := VSS.Combine(MSks, ids)
+		sBig := BN254_FA.FromBytes(s[:])
+
+		H := core.NewHASH256()
+		H.Process_array(ID)
+		HIDBytes := H.Hash()
+		HIDBig := BN254_FA.FromBytes(HIDBytes)
+
+		d := BN254_FA.Modadd(sBig, HIDBig, r)
+		d.Invmodp(r)
+
+		DIdPointCal := BN254_FA.G1mul(G1, d)
+		DIdPoint := BN254_FA.ECP_fromBytes(DId[:])
+
+		fmt.Println(DIdPoint.Equals(DIdPointCal))
+	}
+}
+
+func master_key_refresh() {
+	// if some PKG abort, there only exist K PKG, so refresh
+
+	// every PKG calculate partMSk_i = MSk_i * LagrangPolynomial_i, (partMSks saved in partMSks, [][32]byte)
+	{
+		for i := 0; i < K; i++ {
+			lagPolyBig := BN254_FA.FromBytes(lagPolys[i][:])
+			mSkBig := BN254_FA.FromBytes(MSks[i][:])
+
+			BN254_FA.Modmul(mSkBig, lagPolyBig, r).ToBytes(partMSks[i][:])
+		}
+	}
+
+	// every PKG generates his vss shares (saved in shareRefreshss, 32byte) on partMSk, as well as
+	// 		poly parameters (saved in polyRefreshss, 32byte) and
+	// 		poly parameter multi generator of G1 group (saved in polyRefreshPointss, 65byte)
+	{
+		for i := 0; i < K; i++ {
+			vssError, polyRefreshs, polyRefreshPoints, shareRefreshs := VSS.Vss(partMSks[i], ids, rngs[i], T, N)
+			if vssError < 0 {
+				fmt.Println(strconv.Itoa(i) + "-th PKG, Failed to Vss\n")
+				return
+			}
+			polyRefreshss[i] = polyRefreshs
+			polyRefreshPointss[i] = polyRefreshPoints
+			shareRefreshss[i] = shareRefreshs
+		}
+	}
+
+	// every PKG sends the vss share to corresponding PKG through secure channel, example: PKG i sends sharess[i][j] to PKG j
+	// 		and broadcast the polyRefreshPointss to enable PKG validate the vss share
+	// every PKG validate the received vss share
+	for i := 0; i < N; i++ {
+		fmt.Println(strconv.Itoa(i) + "-th PKG's vss shares:")
+		for j := 0; j < K; j++ {
+			fmt.Println(strconv.FormatBool(VSS.Verify(shareRefreshss[j][i], ids[i], polyRefreshPointss[j])))
+		}
+	}
+
+	// every PKG calculates the master private key share (saved in MSkRefreshs, 32byte)
+	// 		example: PKG i calculate the sum of sharess[j][i] j in (0, N-1) as MSkRefresh
+	for i := 0; i < N; i++ {
+		fmt.Println(strconv.Itoa(i) + "-th PKG's MSkRefresh:")
+		MSkRefresh := BN254_FA.NewBIG()
+		for j := 0; j < K; j++ {
+			temBig := BN254_FA.FromBytes(shareRefreshss[j][i][:])
+			MSkRefresh = BN254_FA.Modadd(MSkRefresh, temBig, r)
+		}
+		MSkRefresh.ToBytes(MSkRefreshs[i][:])
+		printBinary(MSkRefreshs[i][:])
+	}
+}
+
+func verify_refresh_master_key_share() {
+	_, s := VSS.Combine(MSks, ids)
+
+	_, sRefresh := VSS.Combine(MSkRefreshs, ids)
+
+	fmt.Println("\nVerify Refresh master key share:")
+	printBinary(s[:])
+	printBinary(sRefresh[:])
 }
 
 func printBinary(array []byte) {
@@ -491,5 +650,7 @@ func printBinary(array []byte) {
 func main() {
 	master_key_share_generate()
 	user_familiar_key_generate()
-	verify_cs()
+	// verify_user_private_key()
+	master_key_refresh() // due to some PKG abort
+	verify_refresh_master_key_share()
 }
